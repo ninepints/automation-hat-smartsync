@@ -1,0 +1,199 @@
+import enum
+import time
+from threading import Condition, Lock
+
+import automationhat
+
+
+def sleep_until(ts):
+    """Sleeps until time.monotonic() is greater than the given timestamp.
+    """
+    time.sleep(max(0, ts - time.monotonic()))
+
+
+class FlippedRelayWrapper(object):
+    """Wraps an Automation HAT relay object, reversing its apparent state.
+    (The wrapper's on() method turns the underlying relay off, etc.)
+    """
+
+    def __init__(relay):
+        self._relay = relay
+
+    def read(self, value):
+        return not self._relay.read()
+
+    def write(self, value):
+        self._relay.write(not value)
+
+    def is_on(self):
+        return self._relay.is_off()
+
+    def is_off(self):
+        return self._relay.is_on()
+
+    def on(self):
+        self._relay.off()
+
+    def off(self):
+        self._relay.on()
+
+    def toggle(self):
+        self._relay.toggle()
+
+
+class Appliance(object):
+    """Controls a SmartSync notification appliance via Automation HAT.
+    """
+
+    class State(enum.Enum):
+        OFF = 0x0
+        STROBE_ONLY = 0x9
+        HORN_STEADY = 0xb
+        HORN_TEMPORAL = 0x8
+        HORN_MARCH_TIME = 0xe
+
+    _STATE_BITS = 4
+
+    _GLOBAL_LOCK = Lock()
+
+    _RELAYS = [FlippedRelayWrapper(r) for r in [automationhat.relay.one, automationhat.relay.two]]
+    _OUTPUT = automationhat.output.three
+
+    _STROBE_SYNC_INTERVAL_SEC = 0.98
+    _STROBE_SYNC_PRE_EMBED_DURATION_SEC = 0.004
+    _STROBE_SYNC_POST_EMBED_DURATION_SEC = 0.002
+
+    _HORN_EMBED_INTERVAL_ITERS = 8
+    _HORN_EMBED_BIT_DURATION_SEC = 0.001
+
+    @classmethod
+    def disable_auto_lights(cls):
+        """Disables automatic light operation on relevant HAT relays/outputs.
+        """
+        for r in cls._RELAYS:
+            r.auto_light(False)
+        cls._OUTPUT.auto_light(False)
+
+    def __init__(self):
+        self._state = State.OFF
+        self._lock = Lock()
+        self._state_updated = Condition(self._lock)
+
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def set_state(self, state):
+        with self._lock:
+            self._state = state
+            self._state_updated.notify()
+
+    def driver_loop(self, *args, **kwargs):
+        """Enters a loop that drives the appliance.
+
+        The calling thread will periodically send strobe synchronization pulses
+        and horn control signals to the appliance, observing changes in the
+        state attribute of this Appliance instance and responding appropriately.
+        If an optional (non-negative) duration_secs argument is given, the loop
+        loop exits after the duration has elapsed, returning the appliance to
+        standby mode.
+
+        Only one thread (across all Appliance instances) can drive the appliance
+        at a time; overlapping calls will produce an exception.
+        """
+        if not self._GLOBAL_LOCK.acquire(blocking=False):
+            raise RuntimeError('Only one thread can drive the appliance at a time')
+        try:
+            with self._lock:
+                self._driver_loop_impl(*args, **kwargs)
+        finally:
+            self._GLOBAL_LOCK.release()
+
+    def _driver_loop_impl(self, duration_secs=-1):
+        if duration_secs < 0 and duration_secs != -1:
+            raise ValueError('Duration must be non-negative')
+
+        start_ts = time.monotonic()
+        iters_active = 0
+        last_state = None
+
+        # Verify that our relays etc. are in the expected standby state
+        if not all(r.is_off() for r in self._RELAYS) and self._OUTPUT.is_on():
+            raise RuntimeError('Unexpected Automation HAT state entering driver loop')
+
+        try:
+            while True:
+                # Break if we're over time
+                iter_ts = time.monotonic()
+                if duration_secs == -1:
+                    timeout = None
+                elif iter_ts - start_ts > duration_secs:
+                    break
+                else:
+                    timeout = start_ts + duration_secs - iter_ts
+
+
+                if self._state == State.OFF:
+                    # Standby and wait for a non-OFF state, or until we're over time
+                    self._standby()
+                    self._state_updated.wait_for(lambda: self._state != State.OFF, timeout)
+                else:
+                    # Otherwise, send a strobe synchronization pulse
+                    # Embed a horn control signal periodically or after a state change
+                    embed_horn_signal = (
+                        iters_active % self._HORN_EMBED_INTERVAL_ITERS == 0
+                        or last_state != self._state)
+                    self._pulse(embed_horn_signal)
+                    last_state = self._state
+                    iters_active += 1
+
+                # Sleep until 1s after the last iteration started
+                sleep_until(iter_ts + 1)
+
+        finally:
+            self._standby()
+            # Sleep a few seconds, retaining the lock, to prevent back-to-back
+            # calls sending a jumble of signals
+            time.sleep(5)
+
+    def _standby(self):
+        for r in self._RELAYS:
+            r.off()
+        self._OUTPUT.on()
+
+    def _pulse(self, embed_horn_signal):
+        target_ts = time.monotonic()
+
+        # If we're not embedding a horn signal, no need to change polarity/use
+        # the relays; we can just send the strobe synchronization pulse using
+        # the output
+        if not embed_horn_signal:
+            self._OUTPUT.off()
+            sleep_until(target_ts + self._STROBE_SYNC_PRE_EMBED_DURATION_SEC +
+                        self._HORN_EMBED_BIT_DURATION_SEC * self._STATE_BITS +
+                        self._STROBE_SYNC_POST_EMBED_DURATION_SEC)
+            self._OUTPUT.on()
+            return
+
+        # Disable output, set relays to reverse polarity
+        self._OUTPUT.off()
+        for r in self._RELAYS:
+            r.off()
+        target_ts += self._STROBE_SYNC_PRE_EMBED_DURATION_SEC
+        sleep_until(target_ts)
+
+        # Send horn signal bits
+        for i in reversed(range(self._STATE_BITS)):
+            self._OUTPUT.write(self._state.value & 1 << i != 0)
+            target_ts += self._HORN_EMBED_BIT_DURATION_SEC
+            sleep_until(target_ts)
+
+        # Disable output if enabled, set relays to regular polarity
+        self._OUTPUT.off()
+        for r in self._RELAYS:
+            r.on()
+        target_ts += self._STROBE_SYNC_POST_EMBED_DURATION_SEC
+        sleep_until(target_ts)
+
+        self._OUTPUT.on()
