@@ -114,7 +114,7 @@ class Appliance(object):
             raise ValueError('Duration must be non-negative')
 
         start_ts = time.monotonic()
-        iters_active = 0
+        iters_in_state = 0
         last_state = None
 
         # Verify that our relays etc. are in the expected standby state
@@ -140,12 +140,11 @@ class Appliance(object):
                     else:
                         # Otherwise, send a strobe synchronization pulse
                         # Embed a horn control signal periodically or after a state change
-                        embed_horn_signal = (
-                            iters_active % self._HORN_EMBED_INTERVAL_ITERS == 0
-                            or last_state != self._state)
-                        self._pulse(embed_horn_signal)
+                        if self._state != last_state:
+                            iters_in_state = 0
+                        self._pulse(embed_horn_signal=iters_in_state % self._HORN_EMBED_INTERVAL_ITERS == 0)
                         last_state = self._state
-                        iters_active += 1
+                        iters_in_state += 1
 
                 # Sleep until 1s after the last iteration started
                 sleep_until(iter_ts + 1)
