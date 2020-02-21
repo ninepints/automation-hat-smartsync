@@ -105,8 +105,7 @@ class Appliance(object):
         if not self._GLOBAL_LOCK.acquire(blocking=False):
             raise RuntimeError('Only one thread can drive the appliance at a time')
         try:
-            with self._lock:
-                self._driver_loop_impl(*args, **kwargs)
+            self._driver_loop_impl(*args, **kwargs)
         finally:
             self._GLOBAL_LOCK.release()
 
@@ -133,20 +132,20 @@ class Appliance(object):
                 else:
                     timeout = start_ts + duration_secs - iter_ts
 
-
-                if self._state == State.OFF:
-                    # Standby and wait for a non-OFF state, or until we're over time
-                    self._standby()
-                    self._state_updated.wait_for(lambda: self._state != State.OFF, timeout)
-                else:
-                    # Otherwise, send a strobe synchronization pulse
-                    # Embed a horn control signal periodically or after a state change
-                    embed_horn_signal = (
-                        iters_active % self._HORN_EMBED_INTERVAL_ITERS == 0
-                        or last_state != self._state)
-                    self._pulse(embed_horn_signal)
-                    last_state = self._state
-                    iters_active += 1
+                with self._lock:
+                    if self._state == State.OFF:
+                        # Standby and wait for a non-OFF state, or until we're over time
+                        self._standby()
+                        self._state_updated.wait_for(lambda: self._state != State.OFF, timeout)
+                    else:
+                        # Otherwise, send a strobe synchronization pulse
+                        # Embed a horn control signal periodically or after a state change
+                        embed_horn_signal = (
+                            iters_active % self._HORN_EMBED_INTERVAL_ITERS == 0
+                            or last_state != self._state)
+                        self._pulse(embed_horn_signal)
+                        last_state = self._state
+                        iters_active += 1
 
                 # Sleep until 1s after the last iteration started
                 sleep_until(iter_ts + 1)
