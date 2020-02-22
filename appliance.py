@@ -67,39 +67,41 @@ class MethodCallLoggingWrapper(object):
         return attr
 
 
+class State(enum.Enum):
+    OFF = 0x0
+    STROBE_ONLY = 0x9
+    HORN_STEADY = 0xb
+    HORN_TEMPORAL = 0x8
+    HORN_MARCH_TIME = 0xe
+
+
+_STATE_BITS = 4
+
+_GLOBAL_LOCK = Lock()
+
+_RELAYS = [MethodCallLoggingWrapper(FlippedRelayWrapper(automationhat.relay.one), 'relay.one'),
+           MethodCallLoggingWrapper(FlippedRelayWrapper(automationhat.relay.two), 'relay.two')]
+_OUTPUT = MethodCallLoggingWrapper(automationhat.output.three, 'output.three')
+
+_STROBE_SYNC_INTERVAL_SEC = 0.98
+_STROBE_SYNC_PRE_EMBED_DURATION_SEC = 0.004
+_STROBE_SYNC_POST_EMBED_DURATION_SEC = 0.002
+
+_HORN_EMBED_INTERVAL_ITERS = 8
+_HORN_EMBED_BIT_DURATION_SEC = 0.001
+
+
+def disable_auto_lights():
+    """Disables automatic light operation on relevant HAT relays/outputs.
+    """
+    for r in _RELAYS:
+        r.auto_light(False)
+    _OUTPUT.auto_light(False)
+
+
 class Appliance(object):
     """Controls a SmartSync notification appliance via Automation HAT.
     """
-
-    class State(enum.Enum):
-        OFF = 0x0
-        STROBE_ONLY = 0x9
-        HORN_STEADY = 0xb
-        HORN_TEMPORAL = 0x8
-        HORN_MARCH_TIME = 0xe
-
-    _STATE_BITS = 4
-
-    _GLOBAL_LOCK = Lock()
-
-    _RELAYS = [MethodCallLoggingWrapper(FlippedRelayWrapper(automationhat.relay.one), 'relay.one'),
-               MethodCallLoggingWrapper(FlippedRelayWrapper(automationhat.relay.two), 'relay.two')]
-    _OUTPUT = MethodCallLoggingWrapper(automationhat.output.three, 'output.three')
-
-    _STROBE_SYNC_INTERVAL_SEC = 0.98
-    _STROBE_SYNC_PRE_EMBED_DURATION_SEC = 0.004
-    _STROBE_SYNC_POST_EMBED_DURATION_SEC = 0.002
-
-    _HORN_EMBED_INTERVAL_ITERS = 8
-    _HORN_EMBED_BIT_DURATION_SEC = 0.001
-
-    @classmethod
-    def disable_auto_lights(cls):
-        """Disables automatic light operation on relevant HAT relays/outputs.
-        """
-        for r in cls._RELAYS:
-            r.auto_light(False)
-        cls._OUTPUT.auto_light(False)
 
     def __init__(self):
         self._state = State.OFF
@@ -129,12 +131,12 @@ class Appliance(object):
         Only one thread (across all Appliance instances) can drive the appliance
         at a time; overlapping calls will produce an exception.
         """
-        if not self._GLOBAL_LOCK.acquire(blocking=False):
+        if not _GLOBAL_LOCK.acquire(blocking=False):
             raise RuntimeError('Only one thread can drive the appliance at a time')
         try:
             self._driver_loop_impl(*args, **kwargs)
         finally:
-            self._GLOBAL_LOCK.release()
+            _GLOBAL_LOCK.release()
 
     def _driver_loop_impl(self, duration_secs=-1):
         if duration_secs < 0 and duration_secs != -1:
@@ -145,7 +147,7 @@ class Appliance(object):
         last_state = None
 
         # Verify that our relays etc. are in the expected standby state
-        if not all(r.is_off() for r in self._RELAYS) and self._OUTPUT.is_on():
+        if not all(r.is_off() for r in _RELAYS) and _OUTPUT.is_on():
             raise RuntimeError('Unexpected Automation HAT state entering driver loop')
 
         try:
@@ -169,7 +171,7 @@ class Appliance(object):
                         # Embed a horn control signal periodically or after a state change
                         if self._state != last_state:
                             iters_in_state = 0
-                        self._pulse(embed_horn_signal=iters_in_state % self._HORN_EMBED_INTERVAL_ITERS == 0)
+                        self._pulse(embed_horn_signal=iters_in_state % _HORN_EMBED_INTERVAL_ITERS == 0)
                         last_state = self._state
                         iters_in_state += 1
 
@@ -183,9 +185,9 @@ class Appliance(object):
             time.sleep(5)
 
     def _standby(self):
-        for r in self._RELAYS:
+        for r in _RELAYS:
             r.off()
-        self._OUTPUT.on()
+        _OUTPUT.on()
 
     def _pulse(self, embed_horn_signal):
         target_ts = time.monotonic()
@@ -194,31 +196,31 @@ class Appliance(object):
         # the relays; we can just send the strobe synchronization pulse using
         # the output
         if not embed_horn_signal:
-            self._OUTPUT.off()
-            sleep_until(target_ts + self._STROBE_SYNC_PRE_EMBED_DURATION_SEC +
-                        self._HORN_EMBED_BIT_DURATION_SEC * self._STATE_BITS +
-                        self._STROBE_SYNC_POST_EMBED_DURATION_SEC)
-            self._OUTPUT.on()
+            _OUTPUT.off()
+            sleep_until(target_ts + _STROBE_SYNC_PRE_EMBED_DURATION_SEC +
+                        _HORN_EMBED_BIT_DURATION_SEC * _STATE_BITS +
+                        _STROBE_SYNC_POST_EMBED_DURATION_SEC)
+            _OUTPUT.on()
             return
 
         # Disable output, set relays to reverse polarity
-        self._OUTPUT.off()
-        for r in self._RELAYS:
+        _OUTPUT.off()
+        for r in _RELAYS:
             r.off()
-        target_ts += self._STROBE_SYNC_PRE_EMBED_DURATION_SEC
+        target_ts += _STROBE_SYNC_PRE_EMBED_DURATION_SEC
         sleep_until(target_ts)
 
         # Send horn signal bits
-        for i in reversed(range(self._STATE_BITS)):
-            self._OUTPUT.write(self._state.value & 1 << i != 0)
-            target_ts += self._HORN_EMBED_BIT_DURATION_SEC
+        for i in reversed(range(_STATE_BITS)):
+            _OUTPUT.write(self._state.value & 1 << i != 0)
+            target_ts += _HORN_EMBED_BIT_DURATION_SEC
             sleep_until(target_ts)
 
         # Disable output if enabled, set relays to regular polarity
-        self._OUTPUT.off()
-        for r in self._RELAYS:
+        _OUTPUT.off()
+        for r in _RELAYS:
             r.on()
-        target_ts += self._STROBE_SYNC_POST_EMBED_DURATION_SEC
+        target_ts += _STROBE_SYNC_POST_EMBED_DURATION_SEC
         sleep_until(target_ts)
 
-        self._OUTPUT.on()
+        _OUTPUT.on()
