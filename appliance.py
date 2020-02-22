@@ -165,6 +165,7 @@ class Appliance(object):
                     if self._state == State.OFF:
                         # Standby and wait for a non-OFF state, or until we're over time
                         self._standby()
+                        last_state = self._state
                         self._state_updated.wait_for(lambda: self._state != State.OFF, timeout)
                     else:
                         # Otherwise, send a strobe synchronization pulse
