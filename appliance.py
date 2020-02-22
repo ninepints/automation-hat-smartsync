@@ -143,6 +143,7 @@ class Appliance(object):
             raise ValueError('Duration must be non-negative')
 
         start_ts = time.monotonic()
+        target_ts = start_ts
         iters_in_state = 0
         last_state = None
 
@@ -153,13 +154,12 @@ class Appliance(object):
         try:
             while True:
                 # Break if we're over time
-                iter_ts = time.monotonic()
                 if duration_secs == -1:
                     timeout = None
-                elif iter_ts - start_ts > duration_secs:
+                elif target_ts > start_ts + duration_secs:
                     break
                 else:
-                    timeout = start_ts + duration_secs - iter_ts
+                    timeout = start_ts + duration_secs - target_ts
 
                 with self._lock:
                     if self._state == State.OFF:
@@ -175,8 +175,9 @@ class Appliance(object):
                         last_state = self._state
                         iters_in_state += 1
 
-                # Sleep until 1s after the last iteration started
-                sleep_until(iter_ts + 1)
+                # Sleep until it's time to send the next sync pulse
+                target_ts = max(target_ts + _STROBE_SYNC_INTERVAL_SEC, time.monotonic())
+                sleep_until(target_ts)
 
         finally:
             self._standby()
