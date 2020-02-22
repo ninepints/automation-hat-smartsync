@@ -1,8 +1,13 @@
 import enum
+from functools import wraps
+import logging
 import time
 from threading import Condition, Lock
 
 import automationhat
+
+
+logger = logging.getLogger(__name__)
 
 
 def sleep_until(ts):
@@ -41,6 +46,27 @@ class FlippedRelayWrapper(object):
         self._relay.toggle()
 
 
+class MethodCallLoggingWrapper(object):
+    """Wraps an arbitrary object and logs method calls at DEBUG level.
+    """
+
+    def __init__(self, delegate, delegate_repr=None):
+        self._delegate = delegate
+        self._delegate_repr = delegate_repr or repr(delegate)
+
+    def __getattr__(self, name):
+        attr = getattr(self._delegate, name)
+        if callable(attr) and logger.isEnabledFor(logging.DEBUG):
+            @wraps(attr)
+            def wrapper(*args, **kwargs):
+                args_str = ', '.join(
+                    [str(x) for x in args] + [f'{k}={v}' for k, v in kwargs.items()])
+                logger.debug(f'{self._delegate_repr}.{name}({args_str})')
+                return attr(*args, **kwargs)
+            return wrapper
+        return attr
+
+
 class Appliance(object):
     """Controls a SmartSync notification appliance via Automation HAT.
     """
@@ -56,8 +82,9 @@ class Appliance(object):
 
     _GLOBAL_LOCK = Lock()
 
-    _RELAYS = [FlippedRelayWrapper(r) for r in [automationhat.relay.one, automationhat.relay.two]]
-    _OUTPUT = automationhat.output.three
+    _RELAYS = [MethodCallLoggingWrapper(FlippedRelayWrapper(automationhat.relay.one), 'relay.one'),
+               MethodCallLoggingWrapper(FlippedRelayWrapper(automationhat.relay.two), 'relay.two')]
+    _OUTPUT = MethodCallLoggingWrapper(automationhat.output.three, 'output.three')
 
     _STROBE_SYNC_INTERVAL_SEC = 0.98
     _STROBE_SYNC_PRE_EMBED_DURATION_SEC = 0.004
