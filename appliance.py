@@ -21,7 +21,7 @@ class FlippedRelayWrapper(object):
     (The wrapper's on() method turns the underlying relay off, etc.)
     """
 
-    def __init__(relay):
+    def __init__(self, relay):
         self._relay = relay
 
     def read(self, value):
@@ -113,7 +113,7 @@ class Appliance(object):
         return self._state
 
     @state.setter
-    def set_state(self, state):
+    def state(self, state):
         with self._lock:
             self._state = state
             self._state_updated.notify()
