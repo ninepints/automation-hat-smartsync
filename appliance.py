@@ -159,8 +159,8 @@ class Appliance(object):
         last_state = None
 
         # Verify that our relays etc. are in the expected standby state
-        if not all(r.is_off() for r in _RELAYS) and _OUTPUT.is_on():
-            raise RuntimeError('Unexpected Automation HAT state entering driver loop')
+        if not (all(r.is_off() for r in _RELAYS) and _OUTPUT.is_on()):
+            raise RuntimeError('Automation HAT state did not correspond to State.OFF entering driver loop')
 
         try:
             while True:
