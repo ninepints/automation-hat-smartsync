@@ -24,7 +24,7 @@ class FlippedRelayWrapper(object):
     def __init__(self, relay):
         self._relay = relay
 
-    def read(self, value):
+    def read(self):
         return not self._relay.read()
 
     def write(self, value):
