@@ -99,6 +99,17 @@ def disable_auto_lights():
     _OUTPUT.auto_light(False)
 
 
+def standby():
+    """Configures the Automation HAT relays/output for appliance standby mode.
+
+    This corresponds to State.OFF. The HAT should be in this state prior to
+    starting the applicance driver loop.
+    """
+    for r in _RELAYS:
+        r.off()
+    _OUTPUT.on()
+
+
 class Appliance(object):
     """Controls a SmartSync notification appliance via Automation HAT.
     """
@@ -164,7 +175,7 @@ class Appliance(object):
                 with self._lock:
                     if self._state == State.OFF:
                         # Standby and wait for a non-OFF state, or until we're over time
-                        self._standby()
+                        standby()
                         last_state = self._state
                         self._state_updated.wait_for(lambda: self._state != State.OFF, timeout)
                     else:
@@ -181,15 +192,11 @@ class Appliance(object):
                 sleep_until(target_ts)
 
         finally:
-            self._standby()
+            standby()
             # Sleep a few seconds, retaining the lock, to prevent back-to-back
             # calls sending a jumble of signals
             time.sleep(5)
 
-    def _standby(self):
-        for r in _RELAYS:
-            r.off()
-        _OUTPUT.on()
 
     def _pulse(self, embed_horn_signal):
         target_ts = time.monotonic()
