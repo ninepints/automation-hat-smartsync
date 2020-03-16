@@ -116,6 +116,7 @@ class Appliance(object):
 
     def __init__(self):
         self._state = State.OFF
+        self._stopped = False
         self._lock = Lock()
         self._state_updated = Condition(self._lock)
 
@@ -127,6 +128,12 @@ class Appliance(object):
     def state(self, state):
         with self._lock:
             self._state = state
+            self._state_updated.notify()
+
+    def stop(self):
+        """Signals any currently executing driver_loop call to return early."""
+        with self._lock:
+            self._stopped = True
             self._state_updated.notify()
 
     def driver_loop(self, *args, **kwargs):
@@ -145,6 +152,7 @@ class Appliance(object):
         if not _GLOBAL_LOCK.acquire(blocking=False):
             raise RuntimeError('Only one thread can drive the appliance at a time')
         try:
+            self._stopped = False
             self._driver_loop_impl(*args, **kwargs)
         finally:
             _GLOBAL_LOCK.release()
@@ -164,8 +172,11 @@ class Appliance(object):
 
         try:
             while True:
-                # Break if we're over time
-                if duration_secs == -1:
+                # Break if we're over time or were stopped
+                if self._stopped:
+                    self._stopped = False
+                    break
+                elif duration_secs == -1:
                     timeout = None
                 elif target_ts > start_ts + duration_secs:
                     break
@@ -174,10 +185,12 @@ class Appliance(object):
 
                 with self._lock:
                     if self._state == State.OFF:
-                        # Standby and wait for a non-OFF state, or until we're over time
+                        # Standby and wait for a non-OFF state, a stop, or until we're over time
                         standby()
                         last_state = self._state
-                        self._state_updated.wait_for(lambda: self._state != State.OFF, timeout)
+                        self._state_updated.wait_for(
+                            lambda: self._state != State.OFF or self._stopped,
+                            timeout)
                     else:
                         # Otherwise, send a strobe synchronization pulse
                         # Embed a horn control signal periodically or after a state change
